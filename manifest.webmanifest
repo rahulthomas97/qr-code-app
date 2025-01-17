@@ -1,0 +1,1 @@
+{"name":"QR Code Scanner PWA","short_name":"QR Scanner","start_url":"/","display":"standalone","background_color":"#ffffff","lang":"en","scope":"/","description":"A QR Code scanner powered by a neural network.","theme_color":"#ffffff","icons":[{"src":"/icons/icon.jpg","sizes":"512x512","type":"image/png"}]}
