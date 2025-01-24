@@ -11,19 +11,25 @@ import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
+  base: '/qr-code-app/',
   plugins: [
     react(),
     VitePWA({
+      workbox: {
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // 5 MB
+      },
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'robots.txt', 'apple-touch-icon.png'],
       manifest: {
-        name: 'QR Code Scanner PWA',
-        short_name: 'QR Scanner',
+        name: 'qr-code-app',
+        short_name: 'qr-app',
         description: 'A QR Code scanner powered by a neural network.',
         theme_color: '#ffffff',
+        background_color: '#ffffff',
+    display: 'standalone',
         icons: [
           {
-            src: '/icons/icon.jpg',
+            src: 'public/icons/icon.jpg',
             sizes: '512x512',
             type: 'image/png',
           },
@@ -31,5 +37,8 @@ export default defineConfig({
       },
     }),
   ],
+ build: {
+ outDir: 'dist',
+ }
 });
 
