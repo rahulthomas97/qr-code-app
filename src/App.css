@@ -28,9 +28,9 @@ html, body {
 
 .scanner-container {
   position: relative;
-  display: flex;
-  justify-content: center;
-  margin: 20px 0;
+  width: 640px;
+  height: 640px;
+  margin: 0 auto;
 }
 
 button {
