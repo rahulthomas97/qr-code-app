@@ -1,37 +1,53 @@
 import React, { useState, useEffect, useRef } from "react";
 import Webcam from "react-webcam";
 import './App.css';
-import { loadModel, preprocessFrame, processYoloOutput, decodeQRCode, isValidUrl } from './utils';
+import { initializeScanner, preprocessFrame, processYoloOutput, decodeQRCode, isValidUrl } from './utils';
+
+const CAMERA_SWITCH_DELAY = 500; // 1 second delay, adjust as needed
 
 function App() {
-  const [model, setModel] = useState(null);
+  const [scanner, setScanner] = useState({
+    ready: false,
+    status: 'Loading dependencies...',
+    progress: 0,
+    error: null,
+    model: null
+  });
   const [error, setError] = useState(null);
   const [scanning, setScanning] = useState(false);
   const webcamRef = useRef(null);
-  const [modelStatus, setModelStatus] = useState("Loading model...");
-  const [camera, setCamera] = useState("user");
+  const [camera, setCamera] = useState("environment"); // Changed default to environment
   const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
   const [detectionStatus, setDetectionStatus] = useState('');
   const tempCanvasRef = useRef(document.createElement('canvas'));
-  const processingRef = useRef(false);
-  const scanIntervalRef = useRef(null);
+  const isProcessingRef = useRef(false);
+  const animationFrameRef = useRef(null);
+  const [isSwitchingCamera, setIsSwitchingCamera] = useState(false);
 
   useEffect(() => {
-    navigator.mediaDevices.enumerateDevices().then(devices => {
-      const videoInputDevices = devices.filter(device => device.kind === "videoinput");
-      setHasMultipleCameras(videoInputDevices.length > 1);
-    }).catch(error => {
-      console.error("Error enumerating devices:", error);
-      setError("Failed to detect cameras");
-    });
+    async function initialize() {
+      initializeScanner((state) => {
+        setScanner(prev => ({
+          ...prev,
+          ready: state.status == 'Ready',
+          status: state.status,
+          progress: state.progress,
+          model: state.model || prev.model
+        }));
+      });
 
-    // Load the YOLO model
-    loadModel().then(model => {
-      setModel(model);
-    }).catch(error => {
-      console.error("Error loading YOLO model:", error);
-      setError("Failed to load QR detection model");
-    });
+      // Check cameras
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputDevices = devices.filter(device => device.kind === "videoinput");
+        setHasMultipleCameras(videoInputDevices.length > 1);
+      } catch (error) {
+        console.error("Error enumerating devices:", error);
+        setError("Failed to detect cameras");
+      }
+    }
+
+    initialize();
   }, []);
 
   useEffect(() => {
@@ -53,8 +69,8 @@ function App() {
       // Cleanup function
       return () => {
         stopCamera();
-        if (scanIntervalRef.current) {
-          clearInterval(scanIntervalRef.current);
+        if (animationFrameRef.current) {
+          cancelAnimationFrame(animationFrameRef.current);
         }
       };
     }
@@ -67,67 +83,84 @@ function App() {
     }
   };
 
-  const startScanning = () => {
-    if (scanIntervalRef.current) {
-      clearInterval(scanIntervalRef.current);
-    }
+  const processFrame = async (video) => {
+    if (isProcessingRef.current || !video || !scanner.ready) return;
+    
+    isProcessingRef.current = true;
+    try {
+      const inputTensor = preprocessFrame(video);
+      if (!inputTensor) return;
 
-    scanIntervalRef.current = setInterval(async () => {
-      if (processingRef.current || !webcamRef.current?.video || !model || !scanning) {
-        return;
-      }
+      const predictions = await scanner.model.execute(inputTensor);
+      const bestDetection = await processYoloOutput(predictions, video);
+      
+      if (bestDetection) {
 
-      const video = webcamRef.current.video;
-      if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        processingRef.current = true;
-        try {
-          const inputTensor = preprocessFrame(video);
-          if (!inputTensor) {
-            processingRef.current = false;
-            return;
+        const code = decodeQRCode(video, bestDetection.bbox, tempCanvasRef.current);
+        if (code) {
+          const url = code.data;
+          if (isValidUrl(url)) {
+            setDetectionStatus(`URL: ${url.substring(0)}`);
+
+            stopCamera();
+            window.open(url, '_blank');
+            setScanning(false);
+          } else {
+            setDetectionStatus(`Decoded text: ${url.substring(0)}`);
           }
-          const predictions = await model.executeAsync(inputTensor);
-          const bestDetection = await processYoloOutput(predictions, video);
-          
-          if (bestDetection) {
-            const code = decodeQRCode(
-              video, 
-              bestDetection.bbox, 
-              tempCanvasRef.current
-            );
-            if (code) {
-              const url = code.data;
-              const confidence = (bestDetection.confidence * 100).toFixed(1);
-              if (isValidUrl(url)) {
-                setDetectionStatus(`URL: ${url.substring(0)}`);
-                stopCamera();
-                window.open(url, '_blank');
-                setScanning(false);
-              } else {
-                setDetectionStatus(`Decoded text: ${url.substring(0)}`);
-              }
-            } else {
-              setDetectionStatus(`Please adjust placement or brightness of QR code`);
-            }
-          }
-
-          inputTensor.dispose();
-          predictions.forEach(t => t.dispose());
-        } catch (err) {
-          console.error("Detection error:", err);
-        } finally {
-          processingRef.current = false;
+        } else {
+          setDetectionStatus(`Please adjust placement or brightness of QR code`);
         }
       }
-    }, 150);
+
+      inputTensor.dispose();
+      predictions.forEach(t => t.dispose());
+    } catch (err) {
+      console.error("Detection error:", err);
+    } finally {
+      isProcessingRef.current = false;
+    }
+  };
+
+  const startScanning = () => {
+    const scan = async () => {
+      if (!webcamRef.current?.video || !scanning) return;
+      
+      const video = webcamRef.current.video;
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        await processFrame(video);
+      }
+      animationFrameRef.current = requestAnimationFrame(scan);
+    };
+    
+    scan();
+  };
+
+  const handleCameraSwitch = () => {
+    setIsSwitchingCamera(true);
+    stopCamera();
+    
+    setTimeout(() => {
+      setCamera(camera === "environment" ? "user" : "environment");
+      setIsSwitchingCamera(false);
+    }, CAMERA_SWITCH_DELAY);
   };
 
   return (
     <div className="app-wrapper">
       <div className="app-container">
         <h1>QR Code Scanner</h1>
-        {!model && <div className="status">{modelStatus}</div>}
-        {error && <div className="error">{error}</div>}
+        {!scanner.ready && (
+          <div className="status">
+            {scanner.status}
+            {scanner.progress > 0 && scanner.progress < 100 && (
+              <div>Loading: {scanner.progress}%</div>
+            )}
+            {scanner.error && (
+              <div className="error">{scanner.error}</div>
+            )}
+          </div>
+        )}
         <div className="button-container">
           <button 
             onClick={() => {
@@ -138,19 +171,19 @@ function App() {
               setDetectionStatus(scanning ? "" : "Scanning...");
               setError(null);
             }}
-            disabled={!model}
+            disabled={!scanner.ready || isSwitchingCamera}
           >
             {scanning ? "Stop Scanning" : "Start Scanning"}
           </button>
           <button 
-            onClick={() => setCamera(camera === "user" ? "environment" : "user")}
-            disabled={!scanning || !hasMultipleCameras}
+            onClick={handleCameraSwitch}
+            disabled={!scanning || !hasMultipleCameras || isSwitchingCamera}
           >
-            Switch Camera
+            {isSwitchingCamera ? "Switching..." : "Switch Camera"}
           </button>
         </div>
-        {scanning && (
-          <div className="scanner-container">
+        {scanning && !isSwitchingCamera && (
+          <div style={{ position: "relative" }}>
             <Webcam
               ref={webcamRef}
               audio={false}
@@ -161,14 +194,24 @@ function App() {
                 height: 640
               }}
               style={{
-                width: '640px',
-                height: '640px',
+                width: '400px',
+                height: '400px',
                 transform: camera === "user" ? "scaleX(-1)" : "none"
               }}
             />
+            {/* <canvas
+              ref={tempCanvasRef}
+              style={{
+                position: "absolute",
+                top: 10,
+                left: 5,
+                width: '400px',
+                height: '400px'
+              }}
+            /> */}
           </div>
         )}
-        <p>{detectionStatus}</p>
+        <p>{isSwitchingCamera ? "Switching camera..." : detectionStatus}</p>
       </div>
     </div>
   );
